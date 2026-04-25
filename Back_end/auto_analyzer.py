@@ -64,14 +64,20 @@ class AutomaticPokerAnalyzer:
         if self.claude_recognizer:
             try:
                 hole_cards, community_cards, notes = self.claude_recognizer.recognize_cards(image, verbose=False)
-                
+                # Try to extract numeric game state (pot, call, opponents, stack)
+                try:
+                    game_state = self.claude_recognizer.extract_game_state(image, verbose=False)
+                except Exception:
+                    game_state = {'pot_size': None, 'call_amount': None, 'num_opponents': None, 'stack_size': None}
+
                 return {
                     'detected_cards': hole_cards,
                     'detected_community': community_cards,
                     'is_poker_screen': len(hole_cards) > 0,
                     'method': 'Claude Vision',
                     'confidence': 'high',
-                    'analysis_notes': notes
+                    'analysis_notes': notes,
+                    'game_state': game_state
                 }
             except Exception as e:
                 print(f"[AUTO_ANALYZER] Claude detection failed: {e}")

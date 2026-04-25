@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 try:
     from auto_analyzer import AutomaticPokerAnalyzer
     from screenshot_analyzer import PokerTableAnalyzer
-    from poker_engine import analyze_situation
+    from poker_engine import analyze_situation, win_probability, pot_odds, expected_value, recommend_action
 except ImportError as e:
     print(f"Import error: {e}")
     sys.exit(1)
@@ -52,12 +52,30 @@ class HackerPokerBot:
         try:
             self.analyzer = PokerTableAnalyzer()
             self.auto_analyzer = AutomaticPokerAnalyzer()
+            # Try to use Claude Vision if available
+            try:
+                from claude_card_recognizer import ClaudeCardRecognizer
+                self.claude_recognizer = ClaudeCardRecognizer()
+                self.use_claude = True
+            except Exception as e:
+                print(f"Claude Vision not available: {e}")
+                self.claude_recognizer = None
+                self.use_claude = False
         except Exception as e:
             messagebox.showerror("Error", f"Failed to initialize analyzers: {e}")
             return
         
         # Analysis history
         self.analysis_history = []
+        self.scan_interval = 0.5  # FAST: 500ms (was 3 seconds)
+        
+        # Game state (for poker recommendations)
+        self.game_state = {
+            'num_opponents': 5,
+            'pot_size': 100,
+            'call_amount': 20,
+            'stack_size': 1000,
+        }
         
         self._create_hacker_ui()
         self._animate_title()
@@ -158,6 +176,30 @@ class HackerPokerBot:
             bd=1
         )
         clear_btn.pack(side=tk.RIGHT, padx=5, pady=5)
+        
+        # Game state input panel
+        game_panel = tk.Frame(control_panel, bg=BG_DARK, relief=tk.SUNKEN, bd=1)
+        game_panel.pack(side=tk.RIGHT, padx=15)
+        
+        tk.Label(game_panel, text="Opponents:", font=("Courier New", 8), fg=FG_GREEN_DIM, bg=BG_DARK).pack(side=tk.LEFT, padx=3)
+        self.opponents_spinbox = tk.Spinbox(
+            game_panel, from_=1, to=8, width=2, font=("Courier New", 8),
+            bg=BG_DARKER, fg=FG_GREEN, insertbackground=FG_GREEN,
+            relief=tk.SUNKEN, bd=1
+        )
+        self.opponents_spinbox.delete(0, tk.END)
+        self.opponents_spinbox.insert(0, self.game_state['num_opponents'])
+        self.opponents_spinbox.pack(side=tk.LEFT, padx=2)
+        
+        tk.Label(game_panel, text="Pot:", font=("Courier New", 8), fg=FG_GREEN_DIM, bg=BG_DARK).pack(side=tk.LEFT, padx=3)
+        self.pot_entry = tk.Entry(game_panel, width=4, font=("Courier New", 8), bg=BG_DARKER, fg=FG_GREEN, insertbackground=FG_GREEN, relief=tk.SUNKEN, bd=1)
+        self.pot_entry.insert(0, str(self.game_state['pot_size']))
+        self.pot_entry.pack(side=tk.LEFT, padx=2)
+        
+        tk.Label(game_panel, text="Call:", font=("Courier New", 8), fg=FG_GREEN_DIM, bg=BG_DARK).pack(side=tk.LEFT, padx=3)
+        self.call_entry = tk.Entry(game_panel, width=4, font=("Courier New", 8), bg=BG_DARKER, fg=FG_GREEN, insertbackground=FG_GREEN, relief=tk.SUNKEN, bd=1)
+        self.call_entry.insert(0, str(self.game_state['call_amount']))
+        self.call_entry.pack(side=tk.LEFT, padx=2)
         
         # ===== MAIN CONTENT =====
         content = tk.Frame(self.root, bg=BG_DARK)
@@ -318,7 +360,7 @@ class HackerPokerBot:
             self.log_analysis("[*] AUTO-EXECUTE MODE DISABLED", "warning")
     
     def _run_analysis(self):
-        """Run continuous analysis"""
+        """Run continuous analysis with Claude Vision for speed & accuracy"""
         scan_count = 0
         while self.is_running:
             try:
@@ -333,31 +375,86 @@ class HackerPokerBot:
                 # Display on monitor
                 self._display_screenshot(screenshot)
                 
-                # Analyze with AI
-                vision_data = self.analyzer.analyze_table_image(screenshot)
-                poker_data = self.analyzer.extract_poker_data(vision_data)
+                # Analyze with Claude Vision (fast & accurate)
+                if self.use_claude and self.claude_recognizer:
+                    try:
+                        hole_cards, community_cards, notes = self.claude_recognizer.recognize_cards(screenshot, verbose=False)
+                        detected_method = "Claude Vision"
+                        is_poker = len(hole_cards) > 0
+                        detected_cards = hole_cards
+                        
+                        # Also extract game state (pot, call amount, opponents)
+                        try:
+                            game_state = self.claude_recognizer.extract_game_state(screenshot, verbose=False)
+                            if game_state['pot_size']:
+                                self.game_state['pot_size'] = game_state['pot_size']
+                                self.pot_entry.delete(0, tk.END)
+                                self.pot_entry.insert(0, str(int(game_state['pot_size'])))
+                            if game_state['call_amount']:
+                                self.game_state['call_amount'] = game_state['call_amount']
+                                self.call_entry.delete(0, tk.END)
+                                self.call_entry.insert(0, str(int(game_state['call_amount'])))
+                            if game_state['num_opponents']:
+                                self.game_state['num_opponents'] = game_state['num_opponents']
+                                self.opponents_spinbox.delete(0, tk.END)
+                                self.opponents_spinbox.insert(0, str(game_state['num_opponents']))
+                        except Exception as e:
+                            print(f"Game state extraction error: {e}")
+                    except Exception as e:
+                        print(f"Claude Vision error: {e}")
+                        # Fallback to EasyOCR
+                        vision_data = self.analyzer.analyze_table_image(screenshot)
+                        poker_data = self.analyzer.extract_poker_data(vision_data)
+                        detected_method = "EasyOCR"
+                        is_poker = poker_data['is_poker_screen']
+                        detected_cards = poker_data.get('detected_cards', [])
+                else:
+                    # Use EasyOCR
+                    vision_data = self.analyzer.analyze_table_image(screenshot)
+                    poker_data = self.analyzer.extract_poker_data(vision_data)
+                    detected_method = "EasyOCR"
+                    is_poker = poker_data['is_poker_screen']
+                    detected_cards = poker_data.get('detected_cards', [])
                 
-                if poker_data['is_poker_screen']:
+                if is_poker:
                     self.log_analysis(f"\n[✓] SCAN #{scan_count} - POKER TABLE DETECTED", "header")
-                    self.log_analysis(f"    Method: {poker_data.get('method', 'Unknown')}", "good")
+                    self.log_analysis(f"    Method: {detected_method}", "good")
                     
-                    if poker_data.get('detected_cards'):
-                        self.log_analysis(f"    Cards: {poker_data['detected_cards']}", "accent")
+                    if detected_cards:
+                        self.log_analysis(f"    Cards: {detected_cards}", "accent")
+                        
+                        # Log auto-detected game state
+                        if detected_method == "Claude Vision":
+                            self.log_analysis(f"    Game State: Pot=${self.game_state['pot_size']:.0f} | Call=${self.game_state['call_amount']:.0f} | Opponents:{self.game_state['num_opponents']} (AUTO-DETECTED)", "good")
+                        
+                        # Get strategy recommendation
+                        rec = self.get_strategy_recommendation(detected_cards, community_cards if self.use_claude else [])
+                        if rec:
+                            self.log_analysis(f"\n    ◆ STRATEGY ANALYSIS ◆", "accent")
+                            self.log_analysis(f"    Win%: {rec['win_prob']*100:.1f}% | Tie%: {rec['tie_prob']*100:.1f}% | Lose%: {rec['lose_prob']*100:.1f}%", "good")
+                            
+                            if rec['pot_odds'] > 0:
+                                self.log_analysis(f"    Pot Odds: {rec['pot_odds']*100:.1f}% | EV: {rec['expected_value']:+.2f}", "good")
+                            
+                            # Color code the action based on strength
+                            action_tag = "accent" if "RAISE" in rec['action'] else "good" if "CALL" in rec['action'] else "warning" if "CHECK" in rec['action'] else "error"
+                            self.log_analysis(f"    → ACTION: {rec['action']}", action_tag)
+                            self.log_analysis(f"    Reason: {rec['reason']}", "good")
                     
                     if self.auto_mode:
                         self.log_analysis("    [*] AUTO mode: Executing strategy...", "warning")
                     
                     self.stats_label.config(
-                        text=f"Scans: {scan_count} | Mode: {'AUTO' if self.auto_mode else 'ADVISOR'}"
+                        text=f"Scans: {scan_count} | Speed: {self.scan_interval*1000:.0f}ms | Mode: {'AUTO' if self.auto_mode else 'ADVISOR'}"
                     )
                 else:
                     self.log_analysis(f"[✗] SCAN #{scan_count} - NO POKER TABLE DETECTED", "error")
                 
-                time.sleep(3)  # Analysis interval
+                time.sleep(self.scan_interval)  # FAST: 0.5 seconds (was 3 seconds)
             
             except Exception as e:
                 self.log_analysis(f"[!] ERROR: {str(e)}", "error")
-                time.sleep(2)
+                time.sleep(self.scan_interval)
     
     def _display_screenshot(self, img):
         """Display screenshot in monitor"""
@@ -381,6 +478,63 @@ class HackerPokerBot:
         self.analysis_text.delete(1.0, tk.END)
         self.analysis_text.config(state=tk.DISABLED)
         self.log_analysis("[*] LOGS CLEARED", "warning")
+    
+    def get_strategy_recommendation(self, hole_cards, community_cards):
+        """Get poker strategy recommendation from engine"""
+        # Update game state from UI inputs
+        try:
+            self.game_state['num_opponents'] = int(self.opponents_spinbox.get())
+            self.game_state['pot_size'] = float(self.pot_entry.get())
+            self.game_state['call_amount'] = float(self.call_entry.get())
+        except (ValueError, tk.TclError):
+            pass  # Keep defaults if invalid
+        
+        if not hole_cards or len(hole_cards) < 2:
+            return None
+        
+        try:
+            # Convert tuple cards to format poker_engine expects
+            # hole_cards and community_cards are already tuples like [('A', '♠'), ('K', '♥')]
+            
+            # Calculate probabilities
+            probs = win_probability(
+                hole_cards,
+                community_cards,
+                num_opponents=self.game_state['num_opponents'],
+                simulations=1000  # Quick simulation
+            )
+            
+            # Calculate pot odds
+            po = pot_odds(self.game_state['call_amount'], self.game_state['pot_size'])
+            
+            # Calculate expected value
+            ev = expected_value(
+                probs['win'],
+                self.game_state['pot_size'],
+                self.game_state['call_amount']
+            )
+            
+            # Get recommendation
+            rec = recommend_action(
+                probs['win'],
+                po,
+                ev,
+                self.game_state['pot_size'],
+                self.game_state['call_amount']
+            )
+            
+            return {
+                'win_prob': probs['win'],
+                'tie_prob': probs['tie'],
+                'lose_prob': probs['lose'],
+                'pot_odds': po,
+                'expected_value': ev,
+                'action': rec['action'],
+                'reason': rec['reason']
+            }
+        except Exception as e:
+            print(f"Error getting recommendation: {e}")
+            return None
 
 
 def main():

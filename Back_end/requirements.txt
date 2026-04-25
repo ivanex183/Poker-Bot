@@ -1,0 +1,5 @@
+easyocr==1.7.2
+Pillow==11.0.0
+python-dotenv==1.0.0
+mss==7.0.1
+anthropic==0.28.0

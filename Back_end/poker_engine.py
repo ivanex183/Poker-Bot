@@ -5,6 +5,13 @@ import random
 RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A']
 SUITS = ['♠','♥','♦','♣']
 RANK_VALUE = {r: i for i, r in enumerate(RANKS)}
+SUIT_LETTERS = {'♠': 'S', '♥': 'H', '♦': 'D', '♣': 'C'}
+
+def format_card(card):
+    return f"{card[0]}{SUIT_LETTERS.get(card[1], card[1])}"
+
+def format_cards(cards):
+    return " ".join(format_card(card) for card in cards) if cards else "None"
 
 def full_deck(exclude):
     deck = []
@@ -156,8 +163,8 @@ def analyze_situation(hole_cards, community, num_opponents, pot_size, call_amoun
     print("=" * 50)
     print("         POKERBOT ANALYSIS")
     print("=" * 50)
-    print(f"  Hand      : {hole_cards[0]} {hole_cards[1]}")
-    print(f"  Board     : {community if community else 'None'}  [{stage}]")
+    print(f"  Hand      : {format_cards(hole_cards)}")
+    print(f"  Board     : {format_cards(community)}  [{stage}]")
     print(f"  Opponents : {num_opponents}")
     print(f"  Pot       : {pot_size} chips")
     print(f"  To call   : {call_amount} chips")

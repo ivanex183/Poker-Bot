@@ -256,40 +256,43 @@ NOTES: [reason why not a poker screenshot]
     
     def extract_game_state(self, image: Image.Image, verbose: bool = False) -> dict:
         """
-        Use Claude Vision to extract game state (pot, call amount, opponents, stack)
-        
+        Extract game-state information (pot size, call amount, number of opponents, stack size) from the image.
+
         Args:
             image: PIL Image object from screenshot
             verbose: Print debug info
-            
+
         Returns:
-            dict with pot_size, call_amount, num_opponents, stack_size
+            dict with game-state information:
+            - pot_size: Total pot size
+            - call_amount: Amount to call
+            - num_opponents: Number of opponents
+            - stack_size: Player's stack size
         """
         try:
+            # Convert image to base64
             image_base64 = self.image_to_base64(image)
-            
-            prompt = """Analyze this poker screenshot and extract game state information.
+
+            # Create prompt for game-state detection
+            prompt = """Analyze this poker screenshot and extract the following game-state information:
 
 IMPORTANT - Return response in this exact format:
-POT: [number or UNKNOWN]
-CALL: [amount to call or UNKNOWN]
-OPPONENTS: [number of visible opponents or UNKNOWN]
-STACK: [your stack size or UNKNOWN]
-NOTES: [brief description of what you see]
+POT: [total pot size or NONE]
+CALL: [amount to call or NONE]
+OPPONENTS: [number of opponents or NONE]
+STACK: [player's stack size or NONE]
 
-Examples:
-POT: 250
-CALL: 50
-OPPONENTS: 4
-STACK: 1200
-NOTES: Texas Hold'em, online poker table, clear visibility
-
-If values cannot be determined, use UNKNOWN.
+If this is NOT a poker screenshot, respond with:
+POT: NONE
+CALL: NONE
+OPPONENTS: NONE
+STACK: NONE
 """
-            
+
+            # Call Claude Vision API
             message = self.client.messages.create(
                 model=self.model,
-                max_tokens=256,
+                max_tokens=1024,
                 messages=[
                     {
                         "role": "user",
@@ -310,73 +313,59 @@ If values cannot be determined, use UNKNOWN.
                     }
                 ],
             )
-            
+
             response_text = message.content[0].text
             if verbose:
-                print(f"[CLAUDE RECOGNIZER] Game state response:\n{response_text}")
-            
-            # Parse response
+                print(f"[CLAUDE RECOGNIZER] Claude response for game state:\n{response_text}")
+
+            # Parse Claude's response for game-state information
             game_state = self._parse_game_state_response(response_text)
-            
-            if verbose:
-                print(f"[CLAUDE RECOGNIZER] Parsed game state: {game_state}")
-            
             return game_state
-        
+
+        except anthropic.APIError as e:
+            print(f"[CLAUDE RECOGNIZER] API Error during game-state extraction: {e}")
+            return {'pot_size': None, 'call_amount': None, 'num_opponents': None, 'stack_size': None}
         except Exception as e:
-            print(f"[CLAUDE RECOGNIZER] Error extracting game state: {e}")
-            return {
-                'pot_size': None,
-                'call_amount': None,
-                'num_opponents': None,
-                'stack_size': None,
-                'error': str(e)
-            }
-    
+            print(f"[CLAUDE RECOGNIZER] Error during game-state extraction: {e}")
+            return {'pot_size': None, 'call_amount': None, 'num_opponents': None, 'stack_size': None}
+
     def _parse_game_state_response(self, response: str) -> dict:
-        """Parse game state response from Claude"""
+        """
+        Parse Claude's response to extract game-state information.
+
+        Args:
+            response: Text response from Claude Vision API
+
+        Returns:
+            dict with game-state information
+        """
         game_state = {
             'pot_size': None,
             'call_amount': None,
             'num_opponents': None,
-            'stack_size': None,
+            'stack_size': None
         }
-        
-        for line in response.split('\n'):
+
+        lines = response.strip().split('\n')
+        for line in lines:
             line = line.strip()
-            
+
             if line.startswith('POT:'):
-                val = line.replace('POT:', '').strip()
-                if val.upper() != 'UNKNOWN':
-                    try:
-                        game_state['pot_size'] = float(val)
-                    except ValueError:
-                        pass
-            
+                pot_str = line.replace('POT:', '').strip()
+                game_state['pot_size'] = None if pot_str.upper() == 'NONE' else pot_str
+
             elif line.startswith('CALL:'):
-                val = line.replace('CALL:', '').strip()
-                if val.upper() != 'UNKNOWN':
-                    try:
-                        game_state['call_amount'] = float(val)
-                    except ValueError:
-                        pass
-            
+                call_str = line.replace('CALL:', '').strip()
+                game_state['call_amount'] = None if call_str.upper() == 'NONE' else call_str
+
             elif line.startswith('OPPONENTS:'):
-                val = line.replace('OPPONENTS:', '').strip()
-                if val.upper() != 'UNKNOWN':
-                    try:
-                        game_state['num_opponents'] = int(val)
-                    except ValueError:
-                        pass
-            
+                opponents_str = line.replace('OPPONENTS:', '').strip()
+                game_state['num_opponents'] = None if opponents_str.upper() == 'NONE' else int(opponents_str)
+
             elif line.startswith('STACK:'):
-                val = line.replace('STACK:', '').strip()
-                if val.upper() != 'UNKNOWN':
-                    try:
-                        game_state['stack_size'] = float(val)
-                    except ValueError:
-                        pass
-        
+                stack_str = line.replace('STACK:', '').strip()
+                game_state['stack_size'] = None if stack_str.upper() == 'NONE' else stack_str
+
         return game_state
 
 

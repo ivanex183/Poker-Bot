@@ -196,19 +196,32 @@ class PokerBotGUI:
                 
                 # Analyze
                 vision_data = self.analyzer.analyze_table_image(screenshot)
-                extracted = self.auto_analyzer.extract_poker_info_from_text(vision_data['text'])
+                extracted = self.auto_analyzer.extract_poker_info_from_image(screenshot, vision_data=vision_data)
+                if not extracted.get('detected_cards'):
+                    extracted = self.auto_analyzer.extract_poker_info_from_text(vision_data['text'])
                 
                 if extracted['detected_cards'] and len(extracted['detected_cards']) >= 2:
-                    game_state = self.auto_analyzer.smart_infer_poker_data(extracted)
+                    if extracted.get('game_state'):
+                        detected_state = self.auto_analyzer._normalize_game_state(extracted['game_state'])
+                        game_state = {
+                            'hole_cards': extracted.get('detected_cards', []),
+                            'community': extracted.get('detected_community', []),
+                            'pot_size': detected_state.get('pot_size') or 0,
+                            'call_amount': detected_state.get('call_amount') or 0,
+                            'stack': detected_state.get('stack_size') or self.stack_var.get(),
+                        }
+                    else:
+                        game_state = self.auto_analyzer.smart_infer_poker_data(extracted)
                     
                     # Add to history
                     analysis_result = {
                         'timestamp': time.strftime("%H:%M:%S"),
-                        'hole_cards': str(game_state['hole_cards']),
-                        'community': str(game_state['community']),
+                        'hole_cards': self.auto_analyzer._format_cards(game_state['hole_cards']),
+                        'community': self.auto_analyzer._format_cards(game_state['community']),
                         'pot': game_state['pot_size'],
                         'call': game_state['call_amount'],
-                        'stack': game_state['stack']
+                        'stack': game_state['stack'],
+                        'method': extracted.get('method', 'Unknown')
                     }
                     
                     self.analysis_history.append(analysis_result)
@@ -256,6 +269,7 @@ Community   : {analysis['community']}
 Pot Size    : {analysis['pot']} chips
 Call Amount : {analysis['call']} chips
 Stack Size  : {analysis['stack']} chips
+Method      : {analysis.get('method', 'Unknown')}
 
 Status: ✅ Analysis Complete
 """

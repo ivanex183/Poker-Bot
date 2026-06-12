@@ -27,10 +27,19 @@ except ImportError:
 
 from PIL import Image
 
+# Site-specific detector for the 247 Free Poker table.
+try:
+    from site_247freepoker_detector import Site247FreePokerDetector
+    HAS_247_FREE_POKER = True
+except ImportError:
+    HAS_247_FREE_POKER = False
+    print("[AUTO_ANALYZER] 247 Free Poker detector not available")
+
 class AutomaticPokerAnalyzer:
     def __init__(self):
         self.analyzer = PokerTableAnalyzer()
         self.last_analysis = None
+        self.site_247_detector = Site247FreePokerDetector() if HAS_247_FREE_POKER else None
         
         # Initialize Claude card recognizer (primary method)
         if HAS_CLAUDE:
@@ -50,16 +59,29 @@ class AutomaticPokerAnalyzer:
         else:
             self.card_detector = None
     
-    def extract_poker_info_from_image(self, image: Image.Image):
+    def extract_poker_info_from_image(self, image: Image.Image, vision_data=None):
         """
-        Extract poker info from image using Claude Vision (primary) or YOLO (fallback)
+        Extract poker info from image.
+
+        For 247 Free Poker, use a local layout detector first. If that does not
+        find two hole cards, fall back to Claude Vision and then YOLO.
         
         Args:
             image: PIL Image object
+            vision_data: optional OCR output from PokerTableAnalyzer
             
         Returns:
             dict with detected_cards, community_cards, etc.
         """
+        # Site-specific detection for the screen shown in the user's example.
+        if self.site_247_detector:
+            try:
+                site_result = self.site_247_detector.analyze(image, vision_data=vision_data)
+                if site_result.get('is_poker_screen') and len(site_result.get('detected_cards', [])) >= 2:
+                    return site_result
+            except Exception as e:
+                print(f"[AUTO_ANALYZER] 247 Free Poker detection failed: {e}")
+
         # Try Claude Vision first (primary method)
         if self.claude_recognizer:
             try:
@@ -71,13 +93,13 @@ class AutomaticPokerAnalyzer:
                     game_state = {'pot_size': None, 'call_amount': None, 'num_opponents': None, 'stack_size': None}
 
                 return {
-                    'detected_cards': hole_cards,
-                    'detected_community': community_cards,
+                    'detected_cards': self._normalize_cards(hole_cards),
+                    'detected_community': self._normalize_cards(community_cards),
                     'is_poker_screen': len(hole_cards) > 0,
                     'method': 'Claude Vision',
                     'confidence': 'high',
                     'analysis_notes': notes,
-                    'game_state': game_state
+                    'game_state': self._normalize_game_state(game_state)
                 }
             except Exception as e:
                 print(f"[AUTO_ANALYZER] Claude detection failed: {e}")
@@ -90,11 +112,12 @@ class AutomaticPokerAnalyzer:
                 community = self.card_detector.detect_community_cards(image)
                 
                 return {
-                    'detected_cards': hole_cards,
-                    'detected_community': community,
+                    'detected_cards': self._normalize_cards(hole_cards),
+                    'detected_community': self._normalize_cards(community),
                     'is_poker_screen': len(hole_cards) > 0,
                     'method': 'YOLO',
-                    'confidence': 'medium'
+                    'confidence': 'medium',
+                    'game_state': {}
                 }
             except Exception as e:
                 print(f"[AUTO_ANALYZER] YOLO detection failed: {e}")
@@ -107,6 +130,82 @@ class AutomaticPokerAnalyzer:
             'method': 'None',
             'error': 'No card detection method available'
         }
+
+    def _normalize_cards(self, cards):
+        """Convert cards from detector output into poker_engine tuples."""
+        normalized = []
+        suit_map = {
+            'S': '♠', 'SPADE': '♠', 'SPADES': '♠', '♠': '♠',
+            'H': '♥', 'HEART': '♥', 'HEARTS': '♥', '♥': '♥',
+            'D': '♦', 'DIAMOND': '♦', 'DIAMONDS': '♦', '♦': '♦',
+            'C': '♣', 'CLUB': '♣', 'CLUBS': '♣', '♣': '♣',
+        }
+
+        for card in cards or []:
+            rank = None
+            suit = None
+
+            if isinstance(card, tuple) and len(card) >= 2:
+                rank = str(card[0]).upper()
+                suit = str(card[1]).upper()
+            elif isinstance(card, str):
+                text = card.upper().strip()
+                match = re.match(r'(10|[2-9JQKA])\s*([SHDC♠♥♦♣]?)', text)
+                if match:
+                    rank = match.group(1)
+                    suit = match.group(2) or None
+
+            if not rank:
+                continue
+
+            suit = suit_map.get(suit, suit) if suit else None
+            if suit is None or suit not in ['♠', '♥', '♦', '♣']:
+                suit = self._next_available_suit(normalized)
+
+            normalized.append((rank, suit))
+
+        return normalized
+
+    def _next_available_suit(self, cards):
+        used = {suit for _, suit in cards}
+        for suit in ['♠', '♥', '♦', '♣']:
+            if suit not in used:
+                return suit
+        return '♠'
+
+    def _money_to_number(self, value, default=None):
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return value
+
+        match = re.search(r'(\d+(?:,\d{3})*(?:\.\d+)?)', str(value))
+        if not match:
+            return default
+        try:
+            number = float(match.group(1).replace(',', ''))
+            return int(number) if number.is_integer() else number
+        except ValueError:
+            return default
+
+    def _normalize_game_state(self, game_state):
+        game_state = game_state or {}
+        return {
+            'pot_size': self._money_to_number(game_state.get('pot_size') or game_state.get('pot')),
+            'call_amount': self._money_to_number(game_state.get('call_amount') or game_state.get('call'), 0),
+            'num_opponents': self._money_to_number(game_state.get('num_opponents'), None),
+            'stack_size': self._money_to_number(game_state.get('stack_size') or game_state.get('stack')),
+        }
+
+    def _format_cards(self, cards):
+        suit_letters = {'♠': 'S', '♥': 'H', '♦': 'D', '♣': 'C'}
+        formatted = []
+        for card in cards or []:
+            if isinstance(card, tuple) and len(card) >= 2:
+                formatted.append(f"{card[0]}{suit_letters.get(card[1], card[1])}")
+            else:
+                formatted.append(str(card))
+        return "[" + ", ".join(formatted) + "]"
     
     def extract_poker_info_from_text(self, text):
         """
@@ -221,6 +320,7 @@ class AutomaticPokerAnalyzer:
     def run_continuous_auto_analysis(self, show_all=False):
         """
         Run continuous analysis with automatic recommendations.
+        Uses Claude Vision to auto-detect: cards, pot, call amount, opponents, stack.
         Only shows output when poker is detected.
         """
         print("\n" + "="*70)
@@ -232,30 +332,46 @@ class AutomaticPokerAnalyzer:
         last_hand_id = None
         analysis_count = 0
         
-        for poker_data in self.analyzer.run_continuous_analysis():
+        for screenshot_data in self.analyzer.run_continuous_analysis():
             
-            # Check if poker screen
-            if not poker_data.get('is_poker_screen') and not show_all:
+            # Get the image from analyzer
+            image = screenshot_data.get('raw_image')
+            if image is None:
                 continue
             
-            # Extract poker information
-            extracted = self.extract_poker_info_from_text(poker_data['raw_text'])
+            extracted_image = self.extract_poker_info_from_image(image, vision_data=screenshot_data)
+            if extracted_image.get('detected_cards'):
+                hole_cards = extracted_image.get('detected_cards', [])
+                community_cards = extracted_image.get('detected_community', [])
+                game_state = self._normalize_game_state(extracted_image.get('game_state', {}))
+                detected_method = extracted_image.get('method', 'Image detector')
+            else:
+                extracted = self.extract_poker_info_from_text(screenshot_data['text'])
+                game_state = self.smart_infer_poker_data(extracted)
+                hole_cards = game_state.get('hole_cards', [])
+                community_cards = game_state.get('community', [])
+                detected_method = "EasyOCR"
             
-            # Skip if no cards detected
-            if not extracted['detected_cards'] and not show_all:
+            # Get game state values (auto-detected or defaults)
+            num_opponents = int(game_state.get('num_opponents') or 5)
+            pot_size = self._money_to_number(game_state.get('pot_size') or game_state.get('pot'), 0)
+            call_amount = self._money_to_number(game_state.get('call_amount') or game_state.get('call'), 0)
+            stack = self._money_to_number(game_state.get('stack_size') or game_state.get('stack'), 1000)
+            
+            # Check if poker screen detected
+            is_poker = len(hole_cards) >= 2 and detected_method
+            
+            if not is_poker and not show_all:
                 continue
             
-            # Infer poker state
-            game_state = self.smart_infer_poker_data(extracted)
-            
-            # Check if valid for analysis
-            if not game_state['hole_cards'] or len(game_state['hole_cards']) != 2:
+            # Validate hole cards
+            if not hole_cards or len(hole_cards) != 2:
                 if show_all:
-                    print(f"⏭️  Skipping: Could not detect 2 hole cards ({len(game_state['hole_cards'])} found)")
+                    print(f"⏭️  Skipping: Could not detect 2 hole cards")
                 continue
             
             # Check if this is a new hand (use hole cards as ID)
-            hand_id = str(game_state['hole_cards'])
+            hand_id = str(hole_cards) + str(community_cards)
             if hand_id == last_hand_id and not show_all:
                 continue  # Same hand, skip
             
@@ -267,29 +383,34 @@ class AutomaticPokerAnalyzer:
             print(f"🎯 HAND #{analysis_count} - AUTOMATIC ANALYSIS")
             print("="*70)
             
-            print(f"📊 Detected Data:")
-            print(f"   Hole Cards  : {game_state['hole_cards']}")
-            print(f"   Community   : {game_state['community']} ({len(game_state['community'])} cards)")
-            print(f"   Confidence  : {game_state['confidence']}")
-            print(f"   Pot Size    : {game_state['pot_size']} chips")
-            print(f"   Call Amount : {game_state['call_amount']} chips")
-            print(f"   Stack Size  : {game_state['stack']} chips")
-            print(f"   Opponents   : {game_state['num_opponents']}")
+            print(f"📊 AUTO-DETECTED Data:")
+            print(f"   Detection Method: {detected_method}")
+            print(f"   Hole Cards  : {self._format_cards(hole_cards)}")
+            print(f"   Community   : {self._format_cards(community_cards)} ({len(community_cards)} cards)")
+            print(f"   Pot Size    : {pot_size} chips (AUTO)")
+            print(f"   Call Amount : {call_amount} chips (AUTO)")
+            print(f"   Stack Size  : {stack} chips (AUTO)")
+            print(f"   Opponents   : {num_opponents} (AUTO)")
             
             print("\n🔄 Running poker analysis...\n")
             
             try:
                 # Run poker engine analysis
                 analyze_situation(
-                    hole_cards=game_state['hole_cards'],
-                    community=game_state['community'],
-                    num_opponents=game_state['num_opponents'],
-                    pot_size=game_state['pot_size'] or 0,
-                    call_amount=game_state['call_amount'] or 0,
-                    stack=game_state['stack'] or 1000
+                    hole_cards=hole_cards,
+                    community=community_cards,
+                    num_opponents=num_opponents,
+                    pot_size=pot_size,
+                    call_amount=call_amount,
+                    stack=stack
                 )
                 
-                self.last_analysis = game_state
+                self.last_analysis = {
+                    'hole_cards': hole_cards,
+                    'community': community_cards,
+                    'game_state': game_state,
+                    'method': detected_method
+                }
                 
             except Exception as e:
                 print(f"❌ Analysis error: {e}")
